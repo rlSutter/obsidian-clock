@@ -1,0 +1,1280 @@
+* engine.a99 - a two-word-parser graphic adventure engine for the TI-99/4A.
+* Copied into RAM at >A000 by the loader; reads pictures and strings from
+* the cartridge's data banks.  The game itself is data: gen/tables.a99.
+*
+* Screen: Graphics II.  Rows 0-15 are the picture (patterns >0000-0FFF,
+* colours >2000-2FFF); rows 16-23 are a scrolling text window whose third
+* of the pattern table holds the console font.
+*
+* Registers: R0-R9 scratch (R9 also the string pointer in PRSTR), R10 the
+* return stack, R11 the link, R12 CRU, R13-R15 the rule interpreter.
+       AORG >A000
+
+WS     EQU  >8300
+R1LB   EQU  WS+3
+R2LB   EQU  WS+5
+R5LB   EQU  WS+11
+VDPWD  EQU  >8C00
+VDPWA  EQU  >8C02
+VDPRD  EQU  >8800
+GRMRD  EQU  >9800
+GRMWA  EQU  >9C02
+SOUND  EQU  >8400
+NAMTAB EQU  >1800
+TXROW  EQU  NAMTAB+(23*32)     the bottom line, where text is written
+TXTOP  EQU  NAMTAB+(16*32)
+PICBUF EQU  >2000              8K: a picture decompresses here
+STACK  EQU  >FFF0
+
+* variables (cleared at start)
+VARS   EQU  >F000
+CURRM  EQU  VARS               the room the player is in
+PICSHN EQU  VARS+2             the picture on screen (-1 none)
+SCORE  EQU  VARS+4
+TXCOL  EQU  VARS+6
+LINECT EQU  VARS+8             lines printed since the last input
+INLEN  EQU  VARS+10
+VERB   EQU  VARS+12
+NOUN   EQU  VARS+14
+GAMOVR EQU  VARS+16            1 won, 2 died, 3 quit
+W1     EQU  VARS+18
+W2     EQU  VARS+20
+W2UNK  EQU  VARS+22
+LOBJ   EQU  VARS+24
+FIRED  EQU  VARS+26
+NWORDS EQU  VARS+28
+F18A   EQU  VARS+30            nonzero: an F18A answered
+WEUNLK EQU  VARS+80            nonzero: we unlocked it (so lock it again)
+LASTN  EQU  VARS+82            length of the last command typed
+LASTLN EQU  VARS+480           the last command typed, for recall
+WBUF   EQU  VARS+32            6 letters, padded
+KPREV  EQU  VARS+40            the keyboard's last state, 6 columns
+INBUF  EQU  VARS+48            the typed line
+FLAGS  EQU  VARS+96            64 flags, a byte each
+CTRS   EQU  VARS+160           16 counters, a byte each; 0 counts turns
+SCRBUF EQU  VARS+256           224 bytes for scrolling
+VAREND EQU  VARS+512
+
+       .defm ENTER
+       DECT R10
+       MOV  R11,*R10
+       .endm
+       .defm LEAVE
+       MOV  *R10+,R11
+       RT
+       .endm
+
+* ------------------------------------------------------------------ start
+ENTRY  LIMI 0
+       LWPI WS
+       LI   R10,STACK
+       LI   R1,VARS            real RAM is random: clear what we use
+EN1    CLR  *R1+
+       CI   R1,VAREND
+       JL   EN1
+       SETO @PICSHN
+       BL   @SILENT
+       BL   @F18DET            before VINIT: on a 9918A the probe hits VR1/VR7
+       BL   @VINIT
+       BL   @SCAN              note keys already held (the menu's Enter)
+* the title
+       CLR  R1
+       BL   @DRAWPC
+       LI   R8,TITLES
+TI1    MOV  *R8+,R1
+       JLT  TI2
+       MOV  R8,@LOBJ
+       BL   @PRSTR
+       MOV  @LOBJ,R8
+       JMP  TI1
+TI2    LI   R1,TUNE1
+       BL   @PLAY
+TI3    BL   @GETKEY
+       CI   R0,>0D00
+       JNE  TI3
+       CLR  @LINECT
+       BL   @NEWLN
+       LI   R1,MINTRO
+       BL   @PRSTR
+       LI   R1,STARTR
+       MOV  R1,@CURRM
+       BL   @LOOK
+
+* ------------------------------------------------------------------ turns
+TURN   BL   @GETLN
+       BL   @PARSE
+       MOV  R0,R0
+       JEQ  TU1
+       CI   R0,1               an empty line
+       JEQ  TURN
+       LI   R1,MHUH            2: the first word unknown or not a verb
+       CI   R0,3
+       JNE  TU0
+       LI   R1,MWORD           3: the second word unknown
+TU0    BL   @PRSTR
+       JMP  TURN
+TU1    LI   R13,CRULES         the game's own rules come first
+       CLR  R14
+       BL   @RUNRL
+       MOV  @FIRED,R0
+       JNE  TU2
+       BL   @BUILTN
+TU2    MOV  @GAMOVR,R0
+       JNE  TU9
+       MOVB @CTRS,R1           count the turn (to 255)
+       CB   R1,@HFF
+       JEQ  TU3
+       AB   @ONEB,@CTRS
+TU3    LI   R13,ARULES         then everything that happens by itself
+       SETO R14
+       BL   @RUNRL
+       MOV  @GAMOVR,R0
+       JEQ  TURN
+* the end
+TU9    CI   R0,1
+       JNE  TU91
+       LI   R1,MWIN
+       BL   @PRSTR
+       LI   R1,TUNEW
+       JMP  TU92
+TU91   CI   R0,3
+       JEQ  TU93
+       LI   R1,MDEAD
+       BL   @PRSTR
+TU93   LI   R1,TUNED
+TU92   BL   @PLAY
+       BL   @PRSCR
+       CLR  @LINECT
+       LI   R1,MAGAIN
+       BL   @PRSTR
+TU94   BL   @GETKEY
+       CI   R0,>5900           Y: a new game, through the loader
+       JEQ  TU96
+       CI   R0,>4E00           N: back to the console's title screen
+       JNE  TU94
+       BL   @PUTC              show the key was seen before acting on it
+       BL   @NEWLN
+       LI   R1,MBYE
+       BL   @PRSTR
+       BL   @SILENT
+       BL   @F18OFF
+       CLR  @>6000             bank 0 back in: the reset scans the cartridge
+       BLWP @>0000             port for a header, and doesn't reset the bank
+TU96   BL   @PUTC
+       BL   @NEWLN
+       LI   R1,MNEWG
+       BL   @PRSTR
+TU95   BL   @SILENT
+       BL   @F18OFF
+       CLR  @>6000
+       MOV  @>6006,R1          the cartridge header's program entry
+       MOV  @2(R1),R1
+       B    *R1
+
+* ------------------------------------------------------------------ built-in verbs
+BUILTN .ENTER
+       MOV  @VERB,R1
+       CI   R1,6
+       JH   BI1
+       BL   @MOVE              a direction
+       .LEAVE
+BI1    CI   R1,VLOOK
+       JNE  BI2
+       BL   @LOOK
+       .LEAVE
+BI2    CI   R1,VINV
+       JNE  BI3
+       BL   @INVENT
+       .LEAVE
+BI3    CI   R1,VTAKE
+       JNE  BI4
+       BL   @TAKE
+       .LEAVE
+BI4    CI   R1,VDROP
+       JNE  BI5
+       BL   @DROP
+       .LEAVE
+BI5    CI   R1,VEXAMI
+       JEQ  BI51
+       CI   R1,VREAD
+       JNE  BI6
+BI51   BL   @EXAM
+       .LEAVE
+BI6    CI   R1,VSCORE
+       JNE  BI7
+       BL   @PRSCR
+       .LEAVE
+BI7    LI   R2,MTIME
+       CI   R1,VWAIT
+       JEQ  BIMSG
+       LI   R2,MHELP
+       CI   R1,VHELP
+       JEQ  BIMSG
+       CI   R1,VQUIT
+       JNE  BI8
+       LI   R1,3
+       MOV  R1,@GAMOVR
+       .LEAVE
+BI8    LI   R2,MNOHAP          anything else: is the thing even here?
+       MOV  @NOUN,R1
+       JEQ  BIMSG
+       BL   @FINDOB
+       MOV  R2,R0
+       LI   R2,MNOHAP
+       MOV  R0,R0
+       JNE  BIMSG
+       LI   R2,MNOTSE
+BIMSG  MOV  R2,R1
+       BL   @PRSTR
+       .LEAVE
+
+* MOVE - go in direction @VERB (1-6)
+MOVE   .ENTER
+       MOV  @CURRM,R2
+       BL   @ROOMRC
+       A    @VERB,R3
+       CLR  R2
+       MOVB @2(R3),R2          exits start at +3: +2 + direction
+       JNE  MV1
+       LI   R1,MNOWAY
+       BL   @PRSTR
+       .LEAVE
+MV1    SWPB R2
+       MOV  R2,@CURRM
+       BL   @LOOK
+       .LEAVE
+
+* LOOK - the room's picture (if it changed), description and listed things
+LOOK   .ENTER
+       MOV  @CURRM,R2
+       BL   @ROOMRC
+       CLR  R1
+       MOVB @2(R3),R1
+       SWPB R1
+       C    R1,@PICSHN
+       JEQ  LK1
+       MOV  R3,@LOBJ
+       BL   @DRAWPC
+       MOV  @LOBJ,R3
+LK1    MOV  *R3,R1
+       BL   @PRSTR
+       LI   R1,1
+       MOV  R1,@LOBJ
+LK2    MOV  @LOBJ,R2
+       BL   @OBJLC
+       C    R4,@CURRM
+       JNE  LK3
+       MOVB @1(R3),R1          take or list flag
+       JEQ  LK3
+       MOV  @4(R3),R1
+       JEQ  LK3
+       BL   @PRSTR
+LK3    INC  @LOBJ
+       MOV  @LOBJ,R1
+       CI   R1,NOBJS
+       JLE  LK2
+       .LEAVE
+
+INVENT .ENTER
+       LI   R1,MCARRY
+       BL   @PRSTR
+       CLR  @FIRED             counts what was printed
+       LI   R1,1
+       MOV  R1,@LOBJ
+IV1    MOV  @LOBJ,R2
+       BL   @OBJLC
+       CI   R4,255
+       JNE  IV2
+       MOV  @6(R3),R1
+       JEQ  IV2
+       INC  @FIRED
+       BL   @PRSTR
+IV2    INC  @LOBJ
+       MOV  @LOBJ,R1
+       CI   R1,NOBJS
+       JLE  IV1
+       MOV  @FIRED,R1
+       JNE  IV3
+       LI   R1,MNOTHI
+       BL   @PRSTR
+IV3    .LEAVE
+
+TAKE   .ENTER
+       LI   R1,MWHAT
+       MOV  @NOUN,R0
+       JEQ  TKMSG
+       MOV  R0,R1
+       BL   @FINDOB
+       LI   R1,MNOTSE
+       MOV  R2,R2
+       JEQ  TKMSG
+       LI   R1,MHAVE
+       CI   R4,255
+       JEQ  TKMSG
+       LI   R1,MCANT
+       MOVB @1(R3),R0
+       COC  @TAKEW,R0
+       JNE  TKMSG
+       MOVB @HFF,*R3
+       LI   R1,MTAKEN
+TKMSG  BL   @PRSTR
+       .LEAVE
+
+DROP   .ENTER
+       LI   R1,MWHAT
+       MOV  @NOUN,R0
+       JEQ  DRMSG
+       MOV  R0,R1
+       BL   @FINDOB
+       LI   R1,MNOTCA
+       CI   R4,255
+       JNE  DRMSG
+       MOV  @CURRM,R0
+       SWPB R0
+       MOVB R0,*R3
+       LI   R1,MDROPP
+DRMSG  BL   @PRSTR
+       .LEAVE
+
+EXAM   .ENTER
+       LI   R1,MWHAT
+       MOV  @NOUN,R0
+       JEQ  EXMSG
+       MOV  R0,R1
+       BL   @FINDOB
+       LI   R1,MNOTSE
+       MOV  R2,R2
+       JEQ  EXMSG
+       MOV  @8(R3),R1
+       JNE  EXMSG
+       LI   R1,MPLAIN
+EXMSG  BL   @PRSTR
+       .LEAVE
+
+* PRSCR - "YOUR SCORE IS n OF 100."
+PRSCR  .ENTER
+       LI   R1,MSCOR1
+       BL   @PRSTR
+       MOV  @SCORE,R1
+       BL   @PRNUM
+       LI   R1,MSCOR2
+       BL   @PRSTR
+       .LEAVE
+
+* ------------------------------------------------------------------ objects and rooms
+* OBJLC - object R2: R3 its record, R4 its location (255 carried).  Leaf.
+OBJLC  MOV  R2,R3
+       DEC  R3
+       MOV  R3,R4
+       SLA  R3,3
+       SLA  R4,1
+       A    R4,R3
+       AI   R3,OBJS
+       CLR  R4
+       MOVB *R3,R4
+       SWPB R4
+       RT
+
+* ROOMRC - room R2: R3 its record.  Leaf.
+ROOMRC MOV  R2,R3
+       DEC  R3
+       MOV  R3,R4
+       SLA  R3,3
+       SLA  R4,1
+       A    R4,R3
+       AI   R3,ROOMS
+       RT
+
+* FINDOB - an object with noun R1 that is carried or here: R2 its number
+* (0 none), R3 its record, R4 its location.  Carried things win.
+FINDOB .ENTER
+       MOV  R1,R5
+       SWPB R5
+       CLR  R6                 a match in the room, if any
+       LI   R2,1
+FO1    BL   @OBJLC
+       CB   @2(R3),R5
+       JNE  FO3
+       CI   R4,255
+       JEQ  FO9
+       C    R4,@CURRM
+       JNE  FO3
+       MOV  R2,R6
+FO3    INC  R2
+       CI   R2,NOBJS
+       JLE  FO1
+       MOV  R6,R2
+       JNE  FO4
+       CLR  R4                 none
+       .LEAVE
+FO4    BL   @OBJLC
+FO9    .LEAVE
+
+* ------------------------------------------------------------------ the rule interpreter
+* RUNRL - R13 a rule list; R14 = 0: command rules (the first that passes
+* runs, then stop), else auto rules (all that pass run).  @FIRED set if any ran.
+RUNRL  .ENTER
+       CLR  @FIRED
+RR1    MOV  R13,R15            the rule's start
+       MOVB *R13,R1
+       JEQ  RR9
+       MOV  R14,R14
+       JNE  RR3
+       SRL  R1,8
+       C    R1,@VERB
+       JNE  RRNX
+       CLR  R1
+       MOVB @1(R15),R1
+       JEQ  RR3                any noun
+       SRL  R1,8
+       CI   R1,>FF
+       JNE  RR2
+       MOV  @NOUN,R2           no noun
+       JNE  RRNX
+       JMP  RR3
+RR2    C    R1,@NOUN
+       JNE  RRNX
+RR3    MOV  R15,R13
+       AI   R13,3
+       BL   @CONDS
+       MOV  R0,R0
+       JEQ  RRNX
+       BL   @ACTS
+       SETO @FIRED
+       MOV  R14,R14
+       JEQ  RR9
+       MOV  @GAMOVR,R0
+       JNE  RR9
+RRNX   CLR  R1
+       MOVB @2(R15),R1
+       SWPB R1
+       A    R1,R15
+       MOV  R15,R13
+       JMP  RR1
+RR9    .LEAVE
+
+* CONDS - test the conditions at R13: R0 = 1 all pass (R13 then at the
+* actions), 0 one failed.
+CONDS  .ENTER
+CD1    CLR  R1
+       MOVB *R13+,R1
+       JEQ  CDPASS
+       SWPB R1
+       CLR  R2                 the first argument
+       MOVB *R13+,R2
+       SWPB R2
+       SLA  R1,1
+       MOV  @CDTAB-2(R1),R1
+       B    *R1
+CDPASS LI   R0,1
+       .LEAVE
+CDFAIL CLR  R0
+       .LEAVE
+CDTAB  DATA CHERE,CCARRY,CROOM,CFLAG,CNFLAG,CAT,CNCARR,CGE,CEQ
+CHERE  BL   @OBJLC
+       CI   R4,255
+       JEQ  CD1
+       C    R4,@CURRM
+       JEQ  CD1
+       JMP  CDFAIL
+CCARRY BL   @OBJLC
+       CI   R4,255
+       JEQ  CD1
+       JMP  CDFAIL
+CNCARR BL   @OBJLC
+       CI   R4,255
+       JNE  CD1
+       JMP  CDFAIL
+CROOM  C    R2,@CURRM
+       JEQ  CD1
+       JMP  CDFAIL
+CFLAG  MOVB @FLAGS(R2),R0
+       JNE  CD1
+       JMP  CDFAIL
+CNFLAG MOVB @FLAGS(R2),R0
+       JEQ  CD1
+       JMP  CDFAIL
+CAT    BL   @ARG2
+       BL   @OBJLC
+       C    R4,R5
+       JEQ  CD1
+       JMP  CDFAIL
+CGE    BL   @ARG2
+       CLR  R4
+       MOVB @CTRS(R2),R4
+       SWPB R4
+       C    R4,R5
+       JHE  CD1
+       JMP  CDFAIL
+CEQ    BL   @ARG2
+       CLR  R4
+       MOVB @CTRS(R2),R4
+       SWPB R4
+       C    R4,R5
+       JEQ  CD1
+       JMP  CDFAIL
+
+* ARG2 - the next byte at R13 into R5.  Leaf.
+ARG2   CLR  R5
+       MOVB *R13+,R5
+       SWPB R5
+       RT
+
+* ACTS - run the actions at R13 until the 0 that ends them.
+ACTS   .ENTER
+AC1    CLR  R1
+       MOVB *R13+,R1
+       JEQ  AC9
+       SWPB R1
+       SLA  R1,1
+       MOV  @ACTAB-2(R1),R1
+       B    *R1
+AC9    .LEAVE
+ACTAB  DATA AMSG,ASET,ACLR,AMOVE,AGOTO,ASCORE,AWIN,ADIE,AEXIT,ACTR,AINC,ALOOK,AGET
+AMSG   CLR  R1
+       MOVB *R13+,R1
+       MOVB *R13+,@R1LB
+       BL   @PRSTR
+       JMP  AC1
+ASET   BL   @ARG1
+       MOVB @HFF,@FLAGS(R2)
+       JMP  AC1
+ACLR   BL   @ARG1
+       SB   @FLAGS(R2),@FLAGS(R2)
+       JMP  AC1
+AMOVE  BL   @ARG1
+       BL   @ARG2
+       BL   @OBJLC
+       SWPB R5
+       MOVB R5,*R3
+       JMP  AC1
+AGOTO  BL   @ARG1
+       MOV  R2,@CURRM
+       BL   @LOOK
+       JMP  AC1
+ASCORE BL   @ARG1
+       A    R2,@SCORE
+       JMP  AC1
+AWIN   LI   R0,1
+       MOV  R0,@GAMOVR
+       JMP  AC1
+ADIE   LI   R0,2
+       MOV  R0,@GAMOVR
+       JMP  AC1
+AEXIT  BL   @ARG1              room
+       BL   @ROOMRC
+       BL   @ARG2              direction
+       A    R5,R3
+       BL   @ARG2              where it leads
+       SWPB R5
+       MOVB R5,@2(R3)
+       JMP  AC1
+ACTR   BL   @ARG1
+       BL   @ARG2
+       SWPB R5
+       MOVB R5,@CTRS(R2)
+       JMP  AC1
+AINC   BL   @ARG1
+       AB   @ONEB,@CTRS(R2)
+       JMP  AC1
+ALOOK  BL   @LOOK
+       JMP  AC1
+AGET   BL   @ARG1
+       BL   @OBJLC
+       MOVB @HFF,*R3
+       B    @AC1
+
+* ARG1 - the next byte at R13 into R2.  Leaf.
+ARG1   CLR  R2
+       MOVB *R13+,R2
+       SWPB R2
+       RT
+
+* ------------------------------------------------------------------ the parser
+* PARSE - the typed line into @VERB and @NOUN.  R0: 0 ok, 1 empty,
+* 2 first word unknown (or not a verb), 3 second word unknown.
+PARSE  .ENTER
+       CLR  @W1
+       CLR  @W2
+       CLR  @W2UNK
+       CLR  @NWORDS
+       LI   R7,INBUF
+PA1    MOVB *R7,R0             skip spaces
+       JEQ  PA8
+       CB   R0,@SPACE
+       JNE  PA2
+       INC  R7
+       JMP  PA1
+PA2    LI   R1,WBUF            a word: six letters, space padded
+       LI   R2,>2020
+       MOV  R2,*R1
+       MOV  R2,@2(R1)
+       MOV  R2,@4(R1)
+       LI   R3,6
+PA3    MOVB *R7,R0
+       JEQ  PA4
+       CB   R0,@SPACE
+       JEQ  PA4
+       INC  R7
+       MOV  R3,R3
+       JEQ  PA3                past six letters: skip the rest
+       MOVB R0,*R1+
+       DEC  R3
+       JMP  PA3
+PA4    BL   @LOOKUP            R1 = its id, 0 unknown
+       CI   R1,>FE
+       JEQ  PA1                a word to ignore
+       MOV  @NWORDS,R2
+       JNE  PA5
+       INC  @NWORDS
+       MOV  R1,@W1
+       JMP  PA1
+PA5    MOV  R1,@W2             the second word ends it
+       JNE  PA8
+       SETO @W2UNK
+PA8    MOV  @NWORDS,R0
+       JNE  PA9
+       LI   R0,1
+       .LEAVE
+PA9    MOV  @W1,R1
+       JEQ  PAERR2
+       CI   R1,64              a noun first is no command
+       JHE  PAERR2
+       MOV  @W2UNK,R0
+       JNE  PAERR3
+       MOV  @W2,R2
+       CI   R1,VLOOK           LOOK X is EXAMINE X
+       JNE  PA10
+       MOV  R2,R2
+       JEQ  PA10
+       LI   R1,VEXAMI
+PA10   CI   R1,VGO             GO NORTH is NORTH
+       JNE  PA11
+       CI   R2,6
+       JH   PAGO
+       MOV  R2,R1
+       JEQ  PAGO
+       CLR  R2
+PA11   MOV  R1,@VERB
+       MOV  R2,@NOUN
+       CLR  R0
+       .LEAVE
+PAGO   LI   R1,MGOWHE
+       BL   @PRSTR
+       LI   R0,1               (treated as handled: no turn passes)
+       .LEAVE
+PAERR2 LI   R0,2
+       .LEAVE
+PAERR3 LI   R0,3
+       .LEAVE
+
+* LOOKUP - WBUF in the vocabulary: R1 its id (0 unknown).  Leaf.
+LOOKUP LI   R2,VOCAB
+LU1    MOV  *R2,R1
+       JEQ  LU9
+       C    *R2,@WBUF
+       JNE  LU2
+       C    @2(R2),@WBUF+2
+       JNE  LU2
+       C    @4(R2),@WBUF+4
+       JNE  LU2
+       CLR  R1
+       MOVB @6(R2),R1
+       SWPB R1
+       RT
+LU2    AI   R2,8
+       JMP  LU1
+LU9    CLR  R1
+       RT
+
+* ------------------------------------------------------------------ text
+* PRSTR - print string R1 from the data banks.  Uses R0-R9.
+PRSTR  .ENTER
+       SLA  R1,2
+       AI   R1,STRTAB
+       MOV  *R1+,R2
+       CLR  *R2                select its bank
+       MOV  *R1,R9
+PS1    MOVB *R9+,R0
+       JEQ  PS9
+       BL   @PUTC
+       JMP  PS1
+PS9    .LEAVE
+
+* PUTC - character R0 (high byte) at the cursor; >0D is a new line.
+* Keeps R0 and R9.
+PUTC   .ENTER
+       CB   R0,@CRB
+       JEQ  PC2
+       MOV  @TXCOL,R4
+       CI   R4,32
+       JL   PC1
+       BL   @NEWLN
+       CLR  R4
+PC1    AI   R4,TXROW
+       ORI  R4,>4000
+       SWPB R4
+       MOVB R4,@VDPWA
+       SWPB R4
+       MOVB R4,@VDPWA
+       MOVB R0,@VDPWD
+       INC  @TXCOL
+       .LEAVE
+PC2    BL   @NEWLN
+       .LEAVE
+
+* NEWLN - scroll the text window up a line; after seven lines since the
+* last input, wait with --MORE--.  Keeps R0 and R9.
+NEWLN  .ENTER
+       LI   R4,TXTOP+32        read rows 17-23 ...
+       BL   @VRAD4
+       LI   R5,SCRBUF
+       LI   R6,224
+NL1    MOVB @VDPRD,*R5+
+       DEC  R6
+       JNE  NL1
+       LI   R4,TXTOP+>4000     ... and write them to rows 16-22
+       BL   @VWAD4
+       LI   R5,SCRBUF
+       LI   R6,224
+NL2    MOVB *R5+,@VDPWD
+       DEC  R6
+       JNE  NL2
+       LI   R6,32              a blank bottom row
+       LI   R5,>2000
+NL3    MOVB R5,@VDPWD
+       DEC  R6
+       JNE  NL3
+       CLR  @TXCOL
+       INC  @LINECT
+       MOV  @LINECT,R4
+       CI   R4,7
+       JL   NL9
+       DECT R10                --MORE--
+       MOV  R0,*R10
+       LI   R4,TXROW+>4000
+       BL   @VWAD4
+       LI   R5,MORETX
+       LI   R6,8
+NL4    MOVB *R5+,@VDPWD
+       DEC  R6
+       JNE  NL4
+       BL   @GETKEY
+       LI   R4,TXROW+>4000
+       BL   @VWAD4
+       LI   R6,8
+       LI   R5,>2000
+NL5    MOVB R5,@VDPWD
+       DEC  R6
+       JNE  NL5
+       CLR  @LINECT
+       MOV  *R10+,R0
+NL9    .LEAVE
+
+* PRNUM - R1 in decimal.  Uses R0-R9.
+PRNUM  .ENTER
+       CLR  R9
+PN1    CLR  R4
+       MOV  R1,R5
+       DIV  @TEN,R4
+       AI   R5,>30
+       SWPB R5
+       DECT R10
+       MOV  R5,*R10
+       INC  R9
+       MOV  R4,R1
+       JNE  PN1
+PN2    MOV  *R10+,R0
+       BL   @PUTC
+       DEC  R9
+       JNE  PN2
+       .LEAVE
+
+* GETLN - "> " and a line from the keyboard into INBUF (0 ended).
+* Editing keys (the TI's arrows are FCTN-E/S/D/X):
+*   FCTN-S (left, an emulator's Backspace) or FCTN-1 (DEL): delete a letter
+*   FCTN-E (up): the last command again
+*   FCTN-D (right): the next letter of the last command
+*   FCTN-X (down) or FCTN-3 (ERASE): clear the line
+GETLN  .ENTER
+       CLR  @LINECT
+       LI   R0,>3E00
+       BL   @PUTC
+       LI   R0,>2000
+       BL   @PUTC
+       CLR  @INLEN
+GL1    LI   R0,>5F00           the cursor
+       BL   @CURSOR
+       BL   @GETKEY
+       CI   R0,>0D00
+       JEQ  GL9
+       CI   R0,>0800
+       JEQ  GL5
+       CI   R0,>0A00
+       JEQ  GL6
+       CI   R0,>0B00
+       JEQ  GL7
+       CI   R0,>0900
+       JEQ  GL8
+       BL   @GLADD
+       JMP  GL1
+GL5    BL   @GLBS
+       JMP  GL1
+GL6    BL   @GLCLR
+       JMP  GL1
+GL7    BL   @GLCLR             up: the whole last command
+       CLR  R9                 (R9: PUTC keeps it)
+GL71   C    R9,@LASTN
+       JHE  GL1
+       MOVB @LASTLN(R9),R0
+       BL   @GLADD
+       INC  R9
+       JMP  GL71
+GL8    MOV  @INLEN,R9          right: the last command's next letter
+       C    R9,@LASTN
+       JHE  GL1
+       MOVB @LASTLN(R9),R0
+       BL   @GLADD
+       JMP  GL1
+GL9    LI   R0,>2000
+       BL   @CURSOR
+       MOV  @INLEN,R1
+       CLR  R0
+       MOVB R0,@INBUF(R1)
+       MOV  R1,R1              an empty line keeps the old one for recall
+       JEQ  GL99
+       MOV  R1,@LASTN
+       CLR  R2
+GL91   MOVB @INBUF(R2),@LASTLN(R2)
+       INC  R2
+       C    R2,R1
+       JL   GL91
+       BL   @CLRTXT            a fresh window: the command, then its answer
+       LI   R0,>3E00
+       BL   @PUTC
+       LI   R0,>2000
+       BL   @PUTC
+       LI   R9,INBUF
+GL92   MOVB *R9+,R0
+       JEQ  GL99
+       BL   @PUTC
+       JMP  GL92
+GL99   BL   @NEWLN
+       CLR  @LINECT
+       .LEAVE
+
+* CLRTXT - blank the text window (rows 16-23); the cursor to the start of
+* the bottom row.  Leaf.
+CLRTXT LI   R4,TXTOP+>4000
+       LI   R1,>2000
+       LI   R2,256
+       CLR  @TXCOL
+       B    @VFILL
+
+* GLADD - add character R0 to the line, if it fits and is printable.
+GLADD  .ENTER
+       CI   R0,>2000
+       JL   GA9
+       MOV  @INLEN,R1
+       CI   R1,28
+       JHE  GA9
+       MOVB R0,@INBUF(R1)
+       INC  @INLEN
+       BL   @PUTC
+GA9    .LEAVE
+
+* GLBS - delete the line's last character.
+GLBS   .ENTER
+       MOV  @INLEN,R1
+       JEQ  GB9
+       DEC  @INLEN
+       LI   R0,>2000           blank the cursor; the next one covers the letter
+       BL   @CURSOR
+       DEC  @TXCOL
+GB9    .LEAVE
+
+* GLCLR - delete the whole line.
+GLCLR  .ENTER
+GC1    MOV  @INLEN,R1
+       JEQ  GC9
+       BL   @GLBS
+       JMP  GC1
+GC9    .LEAVE
+
+* CURSOR - character R0 at the cursor without moving it.  Leaf.
+CURSOR MOV  @TXCOL,R4
+       AI   R4,TXROW+>4000
+       SWPB R4
+       MOVB R4,@VDPWA
+       SWPB R4
+       MOVB R4,@VDPWA
+       MOVB R0,@VDPWD
+       RT
+
+* ------------------------------------------------------------------ keyboard
+* GETKEY - wait for a key to go down: R0 its character (high byte).
+* >0D Enter; with FCTN: >08 delete, >09 right, >0A clear, >0B up.
+* Uses R1-R8, R12.
+GETKEY .ENTER
+GK1    BL   @SCAN
+       MOV  R0,R0
+       JEQ  GK1
+       LI   R1,1500            a little debounce
+GK2    DEC  R1
+       JNE  GK2
+       .LEAVE
+
+* SCAN - read the keyboard: R0 a key that went down since the last scan,
+* or 0.  Uses R1-R8, R12.  Leaf.
+SCAN   CLR  R12                ALPHA LOCK shares the FCTN row: deselect it
+       SBO  21                 (as the console's own scan does)
+       CLR  R0
+       CLR  R1                 the column, high byte
+       LI   R2,KPREV
+SC1    LI   R12,>0024
+       LDCR R1,3
+       NOP
+       NOP
+       LI   R12,>0006
+       SETO R4
+       STCR R4,8
+       INV  R4
+       ANDI R4,>FF00           1s for keys down
+       MOVB *R2,R5
+       MOVB R4,*R2+
+       SZCB R5,R4              only the ones that just went down
+       MOV  R0,R0
+       JNE  SC3
+       MOVB R4,R4
+       JEQ  SC3
+       LI   R7,>0100           the lowest row down
+       CLR  R8
+SC2    COC  R7,R4
+       JEQ  SC4
+       SLA  R7,1
+       INC  R8
+       CI   R8,8
+       JL   SC2
+       JMP  SC3
+SC4    MOV  R1,R5
+       SRL  R5,5               column * 8
+       A    R8,R5
+       MOVB @KEYMAP(R5),R0
+SC3    AI   R1,>0100
+       CI   R1,>0600
+       JL   SC1
+       MOV  R0,R0              with FCTN held, only the editing keys count
+       JEQ  SC9
+       CLR  R1                 read column 0 again now: FCTN may have gone
+       LI   R12,>0024          down after this pass read it (emulators press
+       LDCR R1,3               FCTN and the letter at the same instant)
+       NOP
+       NOP
+       LI   R12,>0006
+       SETO R4
+       STCR R4,8
+       INV  R4
+       COC  @FCTNB,R4
+       JNE  SC9
+       LI   R1,FCTAB
+SC5    MOVB *R1+,R4
+       JEQ  SC6
+       MOVB *R1+,R5
+       CB   R4,R0
+       JNE  SC5
+       MOVB R5,R0
+       RT
+SC6    CLR  R0                 any other FCTN key: ignored
+SC9    RT
+
+* ------------------------------------------------------------------ pictures and VDP
+* DRAWPC - picture R1: decompress it from its bank, then copy it to VRAM.
+DRAWPC .ENTER
+       MOV  R1,@PICSHN
+       SLA  R1,2
+       AI   R1,PICTAB
+       MOV  *R1+,R2
+       CLR  *R2                select its bank
+       MOV  *R1,R1
+       BL   @UNLZ
+       MOV  @F18A,R0           an F18A: this scene's own palette
+       JEQ  DP0
+       MOV  @PICSHN,R1
+       SLA  R1,5
+       AI   R1,PALTAB
+       BL   @SETPAL
+DP0    LI   R4,>4000           patterns to >0000
+       BL   @VWAD4
+       LI   R1,PICBUF
+       LI   R2,4096
+DP1    MOVB *R1+,@VDPWD
+       DEC  R2
+       JNE  DP1
+       LI   R4,>6000           colours to >2000
+       BL   @VWAD4
+       LI   R2,4096
+DP2    MOVB *R1+,@VDPWD
+       DEC  R2
+       JNE  DP2
+       .LEAVE
+
+* UNLZ - decompress from R1 into PICBUF (8K).  Literal run: 0nnnnnnn and
+* n+1 bytes.  Match: 1lllllll, offset high, offset low: l+3 bytes copied
+* from that far back.  Leaf.
+UNLZ   LI   R2,PICBUF
+UL1    CI   R2,PICBUF+8192
+       JHE  UL9
+       CLR  R4
+       MOVB *R1+,R4
+       SWPB R4
+       CI   R4,>80
+       JHE  UL3
+       INC  R4
+UL2    MOVB *R1+,*R2+
+       DEC  R4
+       JNE  UL2
+       JMP  UL1
+UL3    ANDI R4,>7F
+       AI   R4,3
+       MOVB *R1+,R5
+       MOVB *R1+,@R5LB
+       MOV  R2,R6
+       S    R5,R6
+UL4    MOVB *R6+,*R2+
+       DEC  R4
+       JNE  UL4
+       JMP  UL1
+UL9    RT
+
+* VWAD4 / VRAD4 - the VDP address to R4 (>4000 set for writing).  Leaf.
+VWAD4
+VRAD4  SWPB R4
+       MOVB R4,@VDPWA
+       SWPB R4
+       MOVB R4,@VDPWA
+       RT
+
+* VFILL - R2 bytes of R1's high byte at VRAM R4 (>4000 set).  Leaf.
+VFILL  SWPB R4
+       MOVB R4,@VDPWA
+       SWPB R4
+       MOVB R4,@VDPWA
+VF1    MOVB R1,@VDPWD
+       DEC  R2
+       JNE  VF1
+       RT
+
+* VINIT - Graphics II: picture in the top two thirds, text in the third.
+VINIT  .ENTER
+       LI   R1,VREGS
+       CLR  R0
+VI1    MOVB *R1+,@VDPWA
+       MOV  R0,R2
+       ORI  R2,>8000
+       MOVB R2,@VDPWA
+       AI   R0,>0100
+       CI   R0,>0800
+       JL   VI1
+       LI   R4,>4000           all patterns blank
+       CLR  R1
+       LI   R2,>1800
+       BL   @VFILL
+       LI   R4,>6000           picture colours black
+       LI   R1,>1100
+       LI   R2,>1000
+       BL   @VFILL
+       LI   R4,>7000           text colours: white on black
+       LI   R1,>F100
+       LI   R2,>0800
+       BL   @VFILL
+       LI   R4,NAMTAB+>4000    names: 0-255 for each picture third
+       BL   @VWAD4
+       LI   R3,2
+VI2    CLR  R1
+VI3    MOVB R1,@VDPWD
+       AI   R1,>0100
+       JNE  VI3
+       DEC  R3
+       JNE  VI2
+       LI   R1,>2000           then the text rows, blank
+       LI   R2,256
+VI4    MOVB R1,@VDPWD
+       DEC  R2
+       JNE  VI4
+       LI   R4,>1B00+>4000     no sprites
+       LI   R1,>D000
+       LI   R2,1
+       BL   @VFILL
+       LI   R4,>1000+(32*8)+>4000   the console font into the text third
+       BL   @VWAD4
+       LI   R0,>06B4
+       MOVB R0,@GRMWA
+       SWPB R0
+       MOVB R0,@GRMWA
+       LI   R2,64
+VI5    LI   R3,7
+VI6    MOVB @GRMRD,@VDPWD
+       DEC  R3
+       JNE  VI6
+       CLR  R1
+       MOVB R1,@VDPWD
+       DEC  R2
+       JNE  VI5
+       .LEAVE
+
+* ------------------------------------------------------------------ the F18A
+* WREG - VDP register: R1's high byte the value, its low byte the number.
+* Leaf.
+WREG   MOVB R1,@VDPWA
+       SWPB R1
+       ORI  R1,>8000
+       MOVB R1,@VDPWA
+       RT
+
+* F18DET - is there an F18A?  Ask before unlocking: an unlocked F18A that
+* is sent the unlock pair locks again.  Select status register 1 and read
+* the status twice (the first read clears a 9918A's flags); 111 in the top
+* bits is an unlocked F18A.  Only otherwise send the unlock pair and ask
+* again.  On a 9918A, register numbers wrap at 8 (VR57 lands on VR1, VR15
+* on VR7): VINIT, which runs next, sets those properly.
+F18DET .ENTER
+       CLR  @F18A
+       CLR  @WEUNLK
+       LI   R1,>8001           display off first: no sprite flags while
+       BL   @WREG              the status is read
+       BL   @F18ASK
+       MOV  R0,R0
+       JNE  FD8                already unlocked
+       LI   R1,>1C39           the unlock pair: >1C to VR57, twice
+       BL   @WREG
+       LI   R1,>1C39
+       BL   @WREG
+       BL   @F18ASK
+       MOV  R0,R0
+       JEQ  FD9
+       SETO @WEUNLK
+FD8    SETO @F18A
+FD9    LI   R1,>000F           status register 0 again
+       BL   @WREG
+       .LEAVE
+
+* F18ASK - select status register 1 and read it: R0 nonzero if it reads
+* 111xxxxx.  (The answer is in R0, not the flags: LEAVE's MOV resets them.)
+F18ASK .ENTER
+       LI   R1,>010F
+       BL   @WREG
+       MOVB @>8802,R0
+       NOP
+       MOVB @>8802,R0
+       ANDI R0,>E000
+       CI   R0,>E000
+       SETO R0
+       JEQ  FA9
+       CLR  R0
+FA9    .LEAVE
+
+* SETPAL - load palette entries 0-15 from the 16 words at R1 (>0RGB).
+SETPAL .ENTER
+       MOV  R1,R3
+       LI   R1,>C02F           VR47 = >C0: data-port mode, auto-increment,
+       BL   @WREG              from entry 0
+       LI   R2,16
+SP1    MOV  *R3+,R1
+       MOVB R1,@VDPWD          >0R ...
+       SWPB R1
+       MOVB R1,@VDPWD          ... then >GB
+       DEC  R2
+       JNE  SP1
+       LI   R1,>002F           and out of palette mode
+       BL   @WREG
+       .LEAVE
+
+* F18OFF - before quitting or restarting: the standard palette back, and
+* the F18A locked again if this program unlocked it.  (The console's reset
+* sets VR0-VR7 only; anything else would survive into the next program.)
+F18OFF .ENTER
+       MOV  @F18A,R0
+       JEQ  FO99
+       LI   R1,STDPAL
+       BL   @SETPAL
+       MOV  @WEUNLK,R0
+       JEQ  FO99
+       LI   R1,>0039           unlocked, any write to VR57 locks it
+       BL   @WREG
+       CLR  @WEUNLK
+FO99   .LEAVE
+
+* ------------------------------------------------------------------ sound
+* PLAY - a tune at R1: words of (tone divider, length in frames), 0 ends.
+PLAY   .ENTER
+PL1    MOV  *R1+,R2
+       JEQ  PL9
+       MOV  R2,R3
+       ANDI R3,>000F
+       ORI  R3,>0080
+       SWPB R3
+       MOVB R3,@SOUND
+       SRL  R2,4
+       SWPB R2
+       MOVB R2,@SOUND
+       LI   R3,>9200
+       MOVB R3,@SOUND
+       MOV  *R1+,R2
+PL2    LI   R3,900             about a frame
+PL3    DEC  R3
+       JNE  PL3
+       DEC  R2
+       JNE  PL2
+       LI   R3,>9F00           a short gap between notes
+       MOVB R3,@SOUND
+       LI   R3,300
+PL4    DEC  R3
+       JNE  PL4
+       JMP  PL1
+PL9    BL   @SILENT
+       .LEAVE
+
+SILENT LI   R1,SILNT
+       LI   R2,4
+SI1    MOVB *R1+,@SOUND
+       DEC  R2
+       JNE  SI1
+       RT
+
+* ------------------------------------------------------------------ constants
+VREGS  BYTE >02                VR0: bitmap mode
+       BYTE >C0                VR1: 16K, display on
+       BYTE >06                VR2: names at >1800
+       BYTE >FF                VR3: colours at >2000
+       BYTE >03                VR4: patterns at >0000
+       BYTE >36                VR5: sprite attributes at >1B00
+       BYTE >07                VR6: sprite patterns at >3800
+       BYTE >01                VR7: black border
+SILNT  BYTE >9F,>BF,>DF,>FF
+HFF    BYTE >FF
+ONEB   BYTE 1
+CRB    BYTE >0D
+SPACE  BYTE >20
+       EVEN
+TAKEW  DATA >0100              the take flag, as a byte in the high half
+FCTNB  DATA >1000              FCTN: keyboard column 0, row 4 (SHIFT 5, CTRL 6)
+TEN    DATA 10
+MORETX TEXT '--MORE--'
+* FCTN + key: the code GETLN acts on
+FCTAB  BYTE 'S',>08,'1',>08,'E',>0B,'D',>09,'X',>0A,'3',>0A,0
+       EVEN
+* the keyboard: six columns of eight rows (0 = no character)
+KEYMAP BYTE >3D,>20,>0D,0,0,0,0,0
+       TEXT '.LO92SWX'
+       TEXT ',KI83DEC'
+       TEXT 'MJU74FRV'
+       TEXT 'NHY65GTB'
+       TEXT '/;P01AQZ'
+* tunes: 111861 / Hz
+TUNE1  DATA 254,10,214,10,190,10,169,20,190,10,254,24,0
+TUNEW  DATA 254,8,214,8,169,8,127,30,0
+TUNED  DATA 339,16,380,16,508,40,0
+
+       COPY "../gen/tables.a99"
+PEND
+       END

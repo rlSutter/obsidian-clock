@@ -1,0 +1,6 @@
+# The Obsidian Clock: Python packages, pinned to the versions it was built and
+# tested with.  Offline: pip install --no-index --find-links wheels -r requirements.txt
+pillow==12.1.1            # tools/gen.py (art to Graphics II), test screenshots
+reportlab==4.4.10         # booklet/booklet.py (player's guide)
+pypdf==5.9.0              # booklet/booklet.py (booklet imposition)
+charset-normalizer==3.4.2 # needed by reportlab

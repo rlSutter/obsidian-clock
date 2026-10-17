@@ -1,0 +1,166 @@
+* bank0.a99 - the cartridge header and the loader.  Copies program banks
+* 1-2 into the 32K expansion at >A000-DFFF, then starts the engine there.
+* The engine restarts a game by selecting bank 0 and jumping here again.
+       AORG >6000
+       BYTE >AA,1,1,0
+       DATA 0
+       DATA PROG
+       DATA 0,0
+PROG   DATA 0,START
+       BYTE 18
+       TEXT 'THE OBSIDIAN CLOCK'
+       EVEN
+
+TRAMP  EQU  >8320              scratchpad: the copy routine runs here
+
+START  LIMI 0
+       LWPI >8300
+* the 32K memory expansion: the program runs at >A000 and pictures unpack at
+* >2000.  Write two words, then read back the first: with nothing there, the
+* bus floats (often to the last value written), so the second write makes a
+* missing card read back wrong.
+       LI   R0,>A55A
+       LI   R1,>5AA5
+       LI   R2,>A000
+       BL   @RAMCHK
+       LI   R2,>2000
+       BL   @RAMCHK
+       LI   R1,TRSRC           the copy routine must not live in the bank
+       LI   R2,TRAMP           it switches out: run it from scratchpad
+       LI   R3,(TREND-TRSRC)/2
+LD1    MOV  *R1+,*R2+
+       DEC  R3
+       JNE  LD1
+       LI   R4,>6002           bank 1 ...
+       LI   R2,>A000           ... to >A000
+       BL   @TRAMP
+       LI   R4,>6004           bank 2 ...
+       BL   @TRAMP             ... to >C000 (R2 runs on)
+       B    @>A000
+
+* RAMCHK - RAM at R2?  Writes R0 and R1 to R2 and R2+2, reads both back.
+RAMCHK MOV  R0,*R2
+       MOV  R1,@2(R2)
+       C    *R2,R0
+       JNE  NOMEM
+       C    @2(R2),R1
+       JNE  NOMEM
+       INV  R0                 and the inverse, so a stuck bit shows too
+       INV  R1
+       MOV  R0,*R2
+       MOV  R1,@2(R2)
+       C    *R2,R0
+       JNE  NOMEM
+       C    @2(R2),R1
+       JNE  NOMEM
+       INV  R0
+       INV  R1
+       RT
+
+* NOMEM - no 32K: say so on a plain text screen, then back to the console
+NOMEM  LI   R1,MREGS           Graphics I: names >0000, colours >0380,
+       CLR  R0                 patterns >0800, white on dark blue
+NM1    MOVB *R1+,@>8C02
+       MOV  R0,R2
+       ORI  R2,>8000
+       MOVB R2,@>8C02
+       AI   R0,>0100
+       CI   R0,>0800
+       JL   NM1
+       LI   R0,>4000           names: all spaces
+       BL   @NMADDR
+       LI   R2,768
+       LI   R1,>2000
+NM2    MOVB R1,@>8C00
+       DEC  R2
+       JNE  NM2
+       LI   R0,>4300           no sprites, then the colours: white on blue
+       BL   @NMADDR
+       LI   R1,>D000
+       MOVB R1,@>8C00
+       LI   R0,>4380
+       BL   @NMADDR
+       LI   R2,32
+       LI   R1,>F400
+NM3    MOVB R1,@>8C00
+       DEC  R2
+       JNE  NM3
+       LI   R0,>4900           the console's font, characters 32-95
+       BL   @NMADDR
+       LI   R0,>06B4
+       MOVB R0,@>9C02
+       SWPB R0
+       MOVB R0,@>9C02
+       LI   R2,64
+NM4    LI   R3,7
+NM5    MOVB @>9800,@>8C00
+       DEC  R3
+       JNE  NM5
+       CLR  R1
+       MOVB R1,@>8C00
+       DEC  R2
+       JNE  NM4
+       LI   R4,MTEXT           the lines: VRAM address, length, text
+NM6    MOV  *R4+,R0
+       JEQ  NM8
+       BL   @NMADDR
+       MOV  *R4+,R2
+NM7    MOVB *R4+,@>8C00
+       DEC  R2
+       JNE  NM7
+       INC  R4                 to the next word
+       ANDI R4,>FFFE
+       JMP  NM6
+NM8    BL   @ANYKEY            wait for the menu's key to come up ...
+       JNE  NM8
+NM9    BL   @ANYKEY            ... then for any key
+       JEQ  NM9
+       BLWP @>0000             (bank 0 is still selected: the menu finds us)
+
+* NMADDR - VDP address R0.  ANYKEY - EQ if no key is down.  Leaves.
+NMADDR SWPB R0
+       MOVB R0,@>8C02
+       SWPB R0
+       MOVB R0,@>8C02
+       RT
+ANYKEY CLR  R12                ALPHA LOCK off the FCTN row
+       SBO  21
+       CLR  R1
+AK1    LI   R12,>0024
+       LDCR R1,3
+       LI   R12,>0006
+       SETO R3
+       STCR R3,8
+       INV  R3
+       ANDI R3,>FF00
+       JNE  AK9
+       AI   R1,>0100
+       CI   R1,>0600
+       JL   AK1
+       CLR  R3
+AK9    MOV  R3,R3
+       RT
+
+MREGS  BYTE >00,>C0,>00,>0E,>01,>06,>00,>F4
+MTEXT  DATA >4000+(9*32)+3,26
+       TEXT 'THE OBSIDIAN CLOCK NEEDS'
+       TEXT '  '
+       DATA >4000+(11*32)+3,26
+       TEXT 'THE 32K MEMORY EXPANSION.'
+       TEXT ' '
+       DATA >4000+(15*32)+5,22
+       TEXT 'PRESS ANY KEY TO EXIT.'
+       EVEN
+       DATA 0
+
+* select the bank at R4, copy its 8K to R2 (advancing it), select bank 0
+TRSRC  CLR  *R4
+       LI   R1,>6000
+       LI   R3,4096
+TR1    MOV  *R1+,*R2+
+       DEC  R3
+       JNE  TR1
+       CLR  @>6000
+       RT
+TREND
+       END
